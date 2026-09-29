@@ -94,6 +94,14 @@ factory
    :inherited-members:
 
 
+formats
+-------
+
+.. automodule:: translate.storage.formats
+   :members:
+   :inherited-members:
+
+
 fpo
 ---
 

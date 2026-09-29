@@ -16,50 +16,32 @@
 # You should have received a copy of the GNU General Public License
 # along with this program; if not, see <https://www.gnu.org/licenses/>.
 
-"""factory methods to build real storage objects that conform to base.py."""
+"""
+Factory methods to build real storage objects that conform to base.py.
+
+.. note::
+
+   This module is a compatibility shim over
+   :mod:`translate.storage.formats`, the unified registry of supported
+   storage formats.  New code should use ``translate.storage.formats``
+   directly.
+"""
 
 from __future__ import annotations
 
-import os
-from functools import lru_cache
-from importlib import import_module
-from typing import BinaryIO
+from typing import TYPE_CHECKING, BinaryIO
 
-from translate.storage.base import TranslationStore
+from translate.storage import formats
+from translate.storage.formats import decompressclass, import_class
+
+if TYPE_CHECKING:
+    from translate.storage.base import TranslationStore
+
+__all__ = ("decompressclass", "getclass", "getobject", "import_class")
 
 # TODO: Monolingual formats (with template?)
 
-decompressclass = {
-    "gz": ("gzip", "GzipFile"),
-    "bz2": ("bz2", "BZ2File"),
-}
-
-
-_classes_str = {
-    "csv": ("csvl10n", "csvfile"),
-    "tab": ("omegat", "OmegaTFileTab"),
-    "utf8": ("omegat", "OmegaTFile"),
-    "po": ("po", "pofile"),
-    "pot": ("po", "pofile"),
-    "mo": ("mo", "mofile"),
-    "gmo": ("mo", "mofile"),
-    "qm": ("qm", "qmfile"),
-    "lang": ("mozilla_lang", "LangStore"),
-    "utx": ("utx", "UtxFile"),
-    "_wftm": ("wordfast", "WordfastTMFile"),
-    "_trados_txt_tm": ("trados", "TradosTxtTmFile"),
-    "catkeys": ("catkeys", "CatkeysFile"),
-    "qph": ("qph", "QphFile"),
-    "tbx": ("tbx", "tbxfile"),
-    "tmx": ("tmx", "tmxfile"),
-    "ts": ("ts2", "tsfile"),
-    "xliff": ("xliff", "Xliff1File"),
-    "xlf": ("xliff", "Xliff1File"),
-    "sdlxliff": ("xliff", "Xliff1File"),
-    "ftl": ("fluent", "FluentFile"),
-    "toml": ("toml", "TOMLFile"),
-    "wxl": ("wxl", "WxlFile"),
-}
+_classes_str = formats.classes_str()
 ###  XXX:  if you add anything here, you must also add it to translate.storage.
 
 """Dictionary of file extensions and the names of their associated class.
@@ -68,99 +50,7 @@ Used for dynamic lazy loading of modules.
 _ext is a pseudo extension, that is their is no real extension by that name.
 """
 
-
-def _examine_txt(storefile):
-    """Determine the true filetype for a .txt file."""
-    if isinstance(storefile, str) and os.path.exists(storefile):
-        storefile = open(storefile, "rb")
-    try:
-        start = storefile.read(600)
-    except AttributeError:
-        raise ValueError("Need to read object to determine type") from None
-    # Some encoding magic for Wordfast
-    # pylint: disable-next=import-outside-toplevel
-    from translate.storage import wordfast  # ruff:ignore[import-outside-top-level]
-
-    encoding = wordfast.detect_encoding(start)
-    start = start.decode(encoding)
-    if "%Wordfast TM" in start:
-        pseudo_extension = "_wftm"
-    elif "<RTF Preamble>" in start:
-        pseudo_extension = "_trados_txt_tm"
-    else:
-        raise ValueError("Failed to guess file type.")
-    storefile.seek(0)
-    return pseudo_extension
-
-
-_hiddenclasses = {"txt": _examine_txt}
-
-
-def _is_wordfast(content: bytes) -> bool:
-    """Detect Wordfast content using its supported encodings."""
-    # pylint: disable-next=import-outside-toplevel
-    from translate.storage import wordfast  # ruff:ignore[import-outside-top-level]
-
-    try:
-        return "%Wordfast TM" in content.decode(wordfast.detect_encoding(content))
-    except UnicodeDecodeError:
-        return False
-
-
-def _guess_extension(storefile):
-    """
-    Guesses the type of a file object by looking at the first few
-    characters.  The return value is a file extension.
-    """
-    start = storefile.read(600)
-    if b"<xliff " in start:
-        extension = "xlf"
-    elif b'msgid "' in start:
-        extension = "po"
-    elif _is_wordfast(start):
-        extension = "txt"
-    elif b"<!DOCTYPE TS>" in start:
-        extension = "ts"
-    elif b"<tmx " in start:
-        extension = "tmx"
-    elif b"#UTX" in start:
-        extension = "utx"
-    else:
-        raise ValueError("Failed to guess file type.")
-    storefile.seek(0)
-    return extension
-
-
-def _get_dummy_name(storefile) -> str:
-    """
-    Provides a dummy name for a file object without a name attribute, by
-    guessing the file type.
-    """
-    return f"dummy.{_guess_extension(storefile)}"
-
-
-def _get_name(storefile):
-    """Returns the filename."""
-    if storefile is None:
-        raise ValueError(
-            "This method cannot magically produce a filename when given None as input."
-        )
-    if not isinstance(storefile, str):
-        if not hasattr(storefile, "name"):
-            storefilename = _get_dummy_name(storefile)
-        else:
-            storefilename = storefile.name
-    else:
-        storefilename = storefile
-    return storefilename
-
-
-@lru_cache(maxsize=128)
-def import_class(module_name, class_name, prefix=None):
-    if prefix:
-        module_name = f"{prefix}.{module_name}"
-    module = import_module(module_name)
-    return getattr(module, class_name)
+_hiddenclasses = formats.hidden_classes()
 
 
 def getclass(
@@ -176,38 +66,14 @@ def getclass(
     presented.  Specify ignore to ignore some part at the back of the name
     (like .gz).
     """
-    storefilename = _get_name(storefile)
-    if classes_str is None:
-        classes_str = _classes_str
-    if hiddenclasses is None:
-        hiddenclasses = _hiddenclasses
-    if ignore and storefilename.endswith(ignore):
-        storefilename = storefilename[: -len(ignore)]
-    ext = localfiletype
-    if ext is None:
-        root, ext = os.path.splitext(storefilename)
-        ext = ext[len(os.path.extsep) :].lower()
-        decomp = None
-        if ext in decompressclass:
-            decomp = ext
-            root, ext = os.path.splitext(root)
-            ext = ext[len(os.path.extsep) :].lower()
-        if ext in hiddenclasses:
-            guesserfn = hiddenclasses[ext]
-            if decomp:
-                file = import_class(*decompressclass[decomp])
-                ext = guesserfn(file(storefile))
-            else:
-                ext = guesserfn(storefile)
-    try:
-        # we prefer classes (if given) since that is the older API that Pootle uses
-        if classes:
-            storeclass = classes[ext]
-        else:
-            storeclass = import_class(*classes_str[ext], "translate.storage")
-    except KeyError:
-        raise ValueError(f"Unknown filetype ({storefilename})") from None
-    return storeclass
+    return formats.getclass(
+        storefile,
+        localfiletype,
+        ignore,
+        classes=classes,
+        classes_str=classes_str,
+        hiddenclasses=hiddenclasses,
+    )
 
 
 def getobject(
@@ -224,21 +90,7 @@ def getobject(
 
     Specify ignore to ignore some part at the back of the name (like .gz).
     """
-    if isinstance(storefile, TranslationStore):
-        return storefile
-    if classes_str is None:
-        classes_str = _classes_str
-    if hiddenclasses is None:
-        hiddenclasses = _hiddenclasses
-    if isinstance(storefile, str) and (
-        os.path.isdir(storefile) or storefile.endswith(os.path.sep)
-    ):
-        raise ValueError(
-            f'Cannot process directory "{storefile}" as a translation storage object. '
-            "Please specify a path to a supported file instead."
-        )
-    storefilename = _get_name(storefile)
-    storeclass = getclass(
+    return formats.read(
         storefile,
         localfiletype,
         ignore,
@@ -246,17 +98,6 @@ def getobject(
         classes_str=classes_str,
         hiddenclasses=hiddenclasses,
     )
-    if os.path.exists(storefilename) or not getattr(storefile, "closed", True):
-        _name, ext = os.path.splitext(storefilename)
-        ext = ext[len(os.path.extsep) :].lower()
-        if ext in decompressclass:
-            file = import_class(*decompressclass[ext])
-            storefile = file(storefilename)
-        store = storeclass.parsefile(storefile)
-    else:
-        store = storeclass()
-        store.filename = storefilename
-    return store
 
 
 supported = [
